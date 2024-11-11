@@ -8,6 +8,7 @@ package instrumentation
 import (
 	"context"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,7 +17,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"go.opentelemetry.io/auto/internal/pkg/instrumentation/probe"
 	"go.opentelemetry.io/auto/internal/pkg/instrumentation/probe/sampling"
@@ -185,7 +188,7 @@ func TestDependencyChecks(t *testing.T) {
 }
 
 func fakeManager(t *testing.T) *Manager {
-	m, err := NewManager(slog.Default(), nil, true, nil, NewNoopConfigProvider(nil))
+	m, err := NewManager(slog.Default(), nil, true, nil, NewNoopConfigProvider(nil), "")
 	assert.NoError(t, err)
 	assert.NotNil(t, m)
 
@@ -211,7 +214,7 @@ func mockExeAndBpffs(t *testing.T) {
 }
 
 type shutdownTracerProvider struct {
-	trace.TracerProvider
+	noop.TracerProvider
 
 	called bool
 }
@@ -226,14 +229,13 @@ func TestRunStopping(t *testing.T) {
 	p := newSlowProbe(probeStop)
 
 	tp := new(shutdownTracerProvider)
-	ctrl, err := opentelemetry.NewController(slog.Default(), tp, "")
+	ctrl, err := opentelemetry.NewController(slog.Default(), tp)
 	require.NoError(t, err)
 
 	m := &Manager{
 		otelController: ctrl,
 		logger:         slog.Default(),
 		probes:         map[probe.ID]probe.Probe{{}: p},
-		eventCh:        make(chan *probe.Event),
 		cp:             NewNoopConfigProvider(nil),
 	}
 
@@ -286,7 +288,7 @@ func (p slowProbe) Load(*link.Executable, *process.TargetDetails, *sampling.Conf
 	return nil
 }
 
-func (p slowProbe) Run(c chan<- *probe.Event) {
+func (p slowProbe) Run(func(ptrace.ScopeSpans)) {
 }
 
 func (p slowProbe) Close() error {
@@ -296,24 +298,24 @@ func (p slowProbe) Close() error {
 }
 
 type noopProbe struct {
-	loaded, running, closed bool
+	loaded, running, closed atomic.Bool
 }
 
 var _ probe.Probe = (*noopProbe)(nil)
 
 func (p *noopProbe) Load(*link.Executable, *process.TargetDetails, *sampling.Config) error {
-	p.loaded = true
+	p.loaded.Store(true)
 	return nil
 }
 
-func (p *noopProbe) Run(c chan<- *probe.Event) {
-	p.running = true
+func (p *noopProbe) Run(func(ptrace.ScopeSpans)) {
+	p.running.Store(true)
 }
 
 func (p *noopProbe) Close() error {
-	p.closed = true
-	p.loaded = false
-	p.running = false
+	p.closed.Store(true)
+	p.loaded.Store(false)
+	p.running.Store(false)
 	return nil
 }
 
@@ -368,7 +370,6 @@ func TestConfigProvider(t *testing.T) {
 			netHTTPServerProbeID:       &noopProbe{},
 			somePackageProducerProbeID: &noopProbe{},
 		},
-		eventCh: make(chan *probe.Event),
 		cp: newDummyProvider(Config{
 			InstrumentationLibraryConfigs: map[LibraryID]Library{
 				netHTTPClientLibID: {TracesEnabled: &falseVal},
@@ -379,7 +380,19 @@ func TestConfigProvider(t *testing.T) {
 
 	mockExeAndBpffs(t)
 	runCtx, cancel := context.WithCancel(context.Background())
-	go func() { _ = m.Run(runCtx, &process.TargetDetails{PID: 1000}) }()
+	errCh := make(chan error, 1)
+	go func() { errCh <- m.Run(runCtx, &process.TargetDetails{PID: 1000}) }()
+	t.Cleanup(func() {
+		assert.Eventually(t, func() bool {
+			select {
+			case <-errCh:
+				return true
+			default:
+				return false
+			}
+		}, time.Second, 10*time.Millisecond)
+	})
+
 	assert.Eventually(t, func() bool {
 		select {
 		case <-loadedIndicator:
@@ -391,17 +404,17 @@ func TestConfigProvider(t *testing.T) {
 
 	probeRunning := func(id probe.ID) bool {
 		p := m.probes[id].(*noopProbe)
-		return p.loaded && p.running
+		return p.loaded.Load() && p.running.Load()
 	}
 
 	probePending := func(id probe.ID) bool {
 		p := m.probes[id].(*noopProbe)
-		return !p.loaded && !p.running
+		return !p.loaded.Load() && !p.running.Load()
 	}
 
 	probeClosed := func(id probe.ID) bool {
 		p := m.probes[id].(*noopProbe)
-		return p.closed
+		return p.closed.Load()
 	}
 
 	assert.True(t, probePending(netHTTPClientProbeID))
@@ -457,4 +470,74 @@ func TestConfigProvider(t *testing.T) {
 	assert.Panics(t, func() {
 		m.cp.(*dummyProvider).sendConfig(Config{})
 	})
+}
+
+type hangingProbe struct {
+	probe.Probe
+
+	closeReturned chan struct{}
+}
+
+func newHangingProbe() *hangingProbe {
+	return &hangingProbe{closeReturned: make(chan struct{})}
+}
+
+func (p *hangingProbe) Load(*link.Executable, *process.TargetDetails, *sampling.Config) error {
+	return nil
+}
+
+func (p *hangingProbe) Run(handle func(ptrace.ScopeSpans)) {
+	<-p.closeReturned
+	// Write after Close has returned.
+	handle(ptrace.NewScopeSpans())
+}
+
+func (p *hangingProbe) Close() error {
+	defer close(p.closeReturned)
+	return nil
+}
+
+func TestRunStopDeadlock(t *testing.T) {
+	// Regression test for #1228.
+	p := newHangingProbe()
+
+	tp := new(shutdownTracerProvider)
+	ctrl, err := opentelemetry.NewController(slog.Default(), tp)
+	require.NoError(t, err)
+
+	m := &Manager{
+		otelController: ctrl,
+		logger:         slog.Default(),
+		probes:         map[probe.ID]probe.Probe{{}: p},
+		cp:             NewNoopConfigProvider(nil),
+	}
+
+	mockExeAndBpffs(t)
+
+	ctx, stopCtx := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- m.Run(ctx, &process.TargetDetails{PID: 1000}) }()
+
+	assert.NotPanics(t, func() {
+		stopCtx()
+		assert.Eventually(t, func() bool {
+			select {
+			case <-p.closeReturned:
+				return true
+			default:
+				return false
+			}
+		}, time.Second, 10*time.Millisecond)
+	})
+
+	assert.Eventually(t, func() bool {
+		select {
+		case err = <-errCh:
+			return true
+		default:
+			return false
+		}
+	}, time.Second, 10*time.Millisecond)
+	assert.ErrorIs(t, err, context.Canceled, "Stopping Run error")
+	assert.True(t, tp.called, "Controller not stopped")
 }

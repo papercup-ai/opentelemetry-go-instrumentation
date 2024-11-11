@@ -37,7 +37,7 @@ func (a *app) Run(ctx context.Context, user string, admin bool, in <-chan msg) e
 			attribute.Bool("admin", admin),
 		),
 		trace.WithTimestamp(y2k.Add(500 * time.Microsecond)),
-		trace.WithSpanKind(trace.SpanKindInternal),
+		trace.WithSpanKind(trace.SpanKindServer),
 	}
 	_, span := a.tracer.Start(ctx, "Run", opts...)
 	defer span.End(trace.WithTimestamp(y2k.Add(1 * time.Second)))
@@ -79,7 +79,7 @@ func main() {
 	// give time for auto-instrumentation to start up
 	time.Sleep(5 * time.Second)
 
-	provider := sdk.GetTracerProvider()
+	provider := sdk.TracerProvider()
 	tracer := provider.Tracer(
 		pkgName,
 		trace.WithInstrumentationVersion(pkgVer),
@@ -91,7 +91,6 @@ func main() {
 	defer stop()
 
 	ctx, span := tracer.Start(ctx, "main", trace.WithTimestamp(y2k))
-	defer span.End(trace.WithTimestamp(y2k.Add(5 * time.Second)))
 
 	err := app.Run(ctx, "Alice", true, sig(ctx))
 	if err != nil {
@@ -103,6 +102,8 @@ func main() {
 			trace.WithStackTrace(true),
 		)
 	}
+
+	span.End(trace.WithTimestamp(y2k.Add(5 * time.Second)))
 
 	// give time for auto-instrumentation to report signal
 	time.Sleep(5 * time.Second)

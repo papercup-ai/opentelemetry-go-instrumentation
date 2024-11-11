@@ -14,7 +14,7 @@ import (
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 
-	"go.opentelemetry.io/auto/sdk/telemetry"
+	"go.opentelemetry.io/auto/sdk/internal/telemetry"
 )
 
 var (
@@ -67,8 +67,7 @@ var (
 		TraceState:   "test=green",
 		Attrs:        []telemetry.Attr{telemetry.Int("queue", 17)},
 		DroppedAttrs: 8,
-		// https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1196
-		// Flags: 1,
+		Flags:        1,
 	}
 	pLink = func() ptrace.SpanLink {
 		l := ptrace.NewSpanLink()
@@ -77,8 +76,7 @@ var (
 		l.TraceState().FromRaw("test=green")
 		l.Attributes().PutInt("queue", 17)
 		l.SetDroppedAttributesCount(8)
-		// https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1196
-		// l.SetFlags(1)
+		l.SetFlags(1)
 		return l
 	}()
 

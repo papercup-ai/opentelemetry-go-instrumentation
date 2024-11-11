@@ -10,9 +10,57 @@ OpenTelemetry Go Automatic Instrumentation adheres to [Semantic Versioning](http
 
 ### Added
 
+- Include `server.address` and `server.port` in gRPC spans (>=v1.60.0). ([#1242](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1242))
+- Support Go standard libraries for 1.22.9 and 1.23.3. ([#1250](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1250))
+- Support `google.golang.org/grpc` `1.68.0`. ([#1251](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1251))
+- Support `golang.org/x/net` `0.31.0`. ([#1254](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1254))
+
+### Fixed
+
+- Don't include `db.query.text` attribute in `database/sql` if the query string is empty or not collected. ([#1246](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1246))
+
+### Removed
+
+- The deprecated `go.opentelemetry.io/auto/sdk/telemetry` package is removed. ([#1252](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1252))
+- The deprecated `go.opentelemetry.io/auto/sdk/telemetry/test` module is removed. ([#1252](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1252))
+
+## [v0.17.0-alpha] - 2024-11-05
+
+### Changed
+
+- The SDK provided in `go.opentelemtry.io/auto/sdk` now defaults to No-Op behavior for unimplemented methods of the OpenTelemetry API.
+  This is changed from causing a compilation error for unimplemented methods. ([#1230](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1230))
+- The `GetTracerProvider` function in `go.opentelemtry.io/auto/sdk` is renamed to `TracerProvider`. ([#1231](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1231))
+
+### Fixed
+
+- Sporadic shutdown deadlock. ([#1220](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1220))
+- Only support status codes for versions of `google.golang.org/grpc` >= `1.40`. ([#1235](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1235))
+
+### Deprecated
+
+- The `go.opentelemetry.io/auto/sdk/telemetry` package is deprecated.
+  This package will be removed in the next release. ([#1238](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1238))
+- The `go.opentelemetry.io/auto/sdk/telemetry/test` module is deprecated.
+  This module will be removed in the next release. ([#1238](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1238))
+
+## [v0.16.0-alpha] - 2024-10-22
+
+### Added
+
 - Support `golang.org/x/net` `v0.30.0`. ([#1149](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1149))
 - Support `google.golang.org/grpc` `1.65.1`. ([#1174](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1174))
 - Support `go.opentelemetry.io/otel@v1.31.0`. ([#1178](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1178))
+- Support `google.golang.org/grpc` `1.69.0-dev`. ([#1203](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1203))
+- Implement traceID ratio and parent-based samplers. ([#1150](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1150))
+- The `go.opentelemetry.io/auto/sdk` module.
+  This module is used directly when you want to explicilty use auto-instrumentation to process OTel API telemetry.
+  It is also provided so the default OTel global API will use this when auto-instrumentation is loaded (WIP). ([#1210](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1210))
+
+### Fixed
+
+- The `"golang.org/x/net/http2".FrameHeader.StreamID` offset for version `0.8.0` is corrected. ([#1208](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1208))
+- The `"golang.org/x/net/http2".MetaHeadersFrame.Fields` offset for version `0.8.0` is corrected. ([#1208](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1208))
 
 ## [v0.15.0-alpha] - 2024-10-01
 
@@ -47,6 +95,7 @@ OpenTelemetry Go Automatic Instrumentation adheres to [Semantic Versioning](http
 - Support `google.golang.org/grpc` `1.67.1`. ([#1143](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1143))
 - Support Go `1.22.8`. ([#1143](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1143))
 - Support Go `1.23.2`. ([#1143](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1143))
+- Add gRPC status code attribute for server spans (`rpc.grpc.status_code`). ([#1127](https://github.com/open-telemetry/opentelemetry-go-instrumentation/pull/1127))
 
 ### Changed
 
@@ -439,7 +488,9 @@ OpenTelemetry Go Automatic Instrumentation adheres to [Semantic Versioning](http
 
 This is the first release of OpenTelemetry Go Automatic Instrumentation.
 
-[Unreleased]: https://github.com/open-telemetry/opentelemetry-go-instrumentation/compare/v0.15.0-alpha...HEAD
+[Unreleased]: https://github.com/open-telemetry/opentelemetry-go-instrumentation/compare/v0.17.0-alpha...HEAD
+[v0.17.0-alpha]: https://github.com/open-telemetry/opentelemetry-go-instrumentation/releases/tag/v0.17.0-alpha
+[v0.16.0-alpha]: https://github.com/open-telemetry/opentelemetry-go-instrumentation/releases/tag/v0.16.0-alpha
 [v0.15.0-alpha]: https://github.com/open-telemetry/opentelemetry-go-instrumentation/releases/tag/v0.15.0-alpha
 [v0.14.0-alpha]: https://github.com/open-telemetry/opentelemetry-go-instrumentation/releases/tag/v0.14.0-alpha
 [v0.13.0-alpha]: https://github.com/open-telemetry/opentelemetry-go-instrumentation/releases/tag/v0.13.0-alpha

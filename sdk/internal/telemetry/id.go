@@ -22,14 +22,6 @@ func (tid TraceID) String() string {
 	return hex.EncodeToString(tid[:])
 }
 
-// Size returns the size of the data to serialize.
-func (tid TraceID) Size() int {
-	if tid.IsEmpty() {
-		return 0
-	}
-	return traceIDSize
-}
-
 // IsEmpty returns false if id contains at least one non-zero byte.
 func (tid TraceID) IsEmpty() bool {
 	return tid == [traceIDSize]byte{}
@@ -56,14 +48,6 @@ type SpanID [spanIDSize]byte
 // String returns the hex string representation form of a SpanID.
 func (sid SpanID) String() string {
 	return hex.EncodeToString(sid[:])
-}
-
-// Size returns the size of the data to serialize.
-func (sid SpanID) Size() int {
-	if sid.IsEmpty() {
-		return 0
-	}
-	return spanIDSize
 }
 
 // IsEmpty returns true if the span ID contains at least one non-zero byte.
