@@ -4,11 +4,12 @@
 package sdk
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"reflect"
 	"runtime"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -20,131 +21,13 @@ import (
 	"go.opentelemetry.io/auto/sdk/internal/telemetry"
 )
 
-// TracerProvider returns an auto-instrumentable [trace.TracerProvider].
-//
-// If an [go.opentelemetry.io/auto.Instrumentation] is configured to instrument
-// the process using the returned TracerProvider, all of the telemetry it
-// produces will be processed and handled by that Instrumentation. By default,
-// if no Instrumentation instruments the TracerProvider it will not generate
-// any trace telemetry.
-func TracerProvider() trace.TracerProvider { return tracerProviderInstance }
-
-var tracerProviderInstance = tracerProvider{}
-
-type tracerProvider struct{ noop.TracerProvider }
-
-var _ trace.TracerProvider = tracerProvider{}
-
-func (p tracerProvider) Tracer(name string, opts ...trace.TracerOption) trace.Tracer {
-	cfg := trace.NewTracerConfig(opts...)
-	return tracer{
-		name:      name,
-		version:   cfg.InstrumentationVersion(),
-		schemaURL: cfg.SchemaURL(),
-	}
-}
-
-type tracer struct {
-	noop.Tracer
-
-	name, schemaURL, version string
-}
-
-var _ trace.Tracer = tracer{}
-
-func (t tracer) Start(ctx context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
-	var psc trace.SpanContext
-	span := &span{sampled: true}
-
-	// Ask eBPF for sampling decision and span context info.
-	t.start(ctx, span, &psc, &span.sampled, &span.spanContext)
-
-	ctx = trace.ContextWithSpan(ctx, span)
-
-	if span.sampled {
-		// Only build traces if sampled.
-		cfg := trace.NewSpanStartConfig(opts...)
-		span.traces, span.span = t.traces(ctx, name, cfg, span.spanContext, psc)
-	}
-
-	return ctx, span
-}
-
-// Expected to be implemented in eBPF.
-//
-//go:noinline
-func (t *tracer) start(
-	ctx context.Context,
-	spanPtr *span,
-	psc *trace.SpanContext,
-	sampled *bool,
-	sc *trace.SpanContext,
-) {
-	start(ctx, spanPtr, psc, sampled, sc)
-}
-
-// start is used for testing.
-var start = func(context.Context, *span, *trace.SpanContext, *bool, *trace.SpanContext) {}
-
-func (t tracer) traces(ctx context.Context, name string, cfg trace.SpanConfig, sc, psc trace.SpanContext) (*telemetry.Traces, *telemetry.Span) {
-	span := &telemetry.Span{
-		TraceID:      telemetry.TraceID(sc.TraceID()),
-		SpanID:       telemetry.SpanID(sc.SpanID()),
-		Flags:        uint32(sc.TraceFlags()),
-		TraceState:   sc.TraceState().String(),
-		ParentSpanID: telemetry.SpanID(psc.SpanID()),
-		Name:         name,
-		Kind:         spanKind(cfg.SpanKind()),
-		Attrs:        convAttrs(cfg.Attributes()),
-		Links:        convLinks(cfg.Links()),
-	}
-
-	if t := cfg.Timestamp(); !t.IsZero() {
-		span.StartTime = cfg.Timestamp()
-	} else {
-		span.StartTime = time.Now()
-	}
-
-	return &telemetry.Traces{
-		ResourceSpans: []*telemetry.ResourceSpans{
-			{
-				ScopeSpans: []*telemetry.ScopeSpans{
-					{
-						Scope: &telemetry.Scope{
-							Name:    t.name,
-							Version: t.version,
-						},
-						Spans:     []*telemetry.Span{span},
-						SchemaURL: t.schemaURL,
-					},
-				},
-			},
-		},
-	}, span
-}
-
-func spanKind(kind trace.SpanKind) telemetry.SpanKind {
-	switch kind {
-	case trace.SpanKindInternal:
-		return telemetry.SpanKindInternal
-	case trace.SpanKindServer:
-		return telemetry.SpanKindServer
-	case trace.SpanKindClient:
-		return telemetry.SpanKindClient
-	case trace.SpanKindProducer:
-		return telemetry.SpanKindProducer
-	case trace.SpanKindConsumer:
-		return telemetry.SpanKindConsumer
-	}
-	return telemetry.SpanKind(0) // undefined.
-}
-
 type span struct {
 	noop.Span
 
-	sampled     bool
 	spanContext trace.SpanContext
+	sampled     atomic.Bool
 
+	mu     sync.Mutex
 	traces *telemetry.Traces
 	span   *telemetry.Span
 }
@@ -153,6 +36,7 @@ func (s *span) SpanContext() trace.SpanContext {
 	if s == nil {
 		return trace.SpanContext{}
 	}
+	// s.spanContext is immutable, do not acquire lock s.mu.
 	return s.spanContext
 }
 
@@ -160,13 +44,17 @@ func (s *span) IsRecording() bool {
 	if s == nil {
 		return false
 	}
-	return s.sampled
+
+	return s.sampled.Load()
 }
 
 func (s *span) SetStatus(c codes.Code, msg string) {
-	if s == nil || !s.sampled {
+	if s == nil || !s.sampled.Load() {
 		return
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	if s.span.Status == nil {
 		s.span.Status = new(telemetry.Status)
@@ -185,11 +73,19 @@ func (s *span) SetStatus(c codes.Code, msg string) {
 }
 
 func (s *span) SetAttributes(attrs ...attribute.KeyValue) {
-	if s == nil || !s.sampled {
+	if s == nil || !s.sampled.Load() {
 		return
 	}
 
-	// TODO: handle attribute limits.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	limit := maxSpan.Attrs
+	if limit == 0 {
+		// No attributes allowed.
+		s.span.DroppedAttrs += uint32(len(attrs))
+		return
+	}
 
 	m := make(map[string]int)
 	for i, a := range s.span.Attrs {
@@ -199,6 +95,7 @@ func (s *span) SetAttributes(attrs ...attribute.KeyValue) {
 	for _, a := range attrs {
 		val := convAttrValue(a.Value)
 		if val.Empty() {
+			s.span.DroppedAttrs++
 			continue
 		}
 
@@ -207,17 +104,40 @@ func (s *span) SetAttributes(attrs ...attribute.KeyValue) {
 				Key:   string(a.Key),
 				Value: val,
 			}
-		} else {
+		} else if limit < 0 || len(s.span.Attrs) < limit {
 			s.span.Attrs = append(s.span.Attrs, telemetry.Attr{
 				Key:   string(a.Key),
 				Value: val,
 			})
 			m[string(a.Key)] = len(s.span.Attrs) - 1
+		} else {
+			s.span.DroppedAttrs++
 		}
 	}
 }
 
+// convCappedAttrs converts up to limit attrs into a []telemetry.Attr. The
+// number of dropped attributes is also returned.
+func convCappedAttrs(limit int, attrs []attribute.KeyValue) ([]telemetry.Attr, uint32) {
+	if limit == 0 {
+		return nil, uint32(len(attrs))
+	}
+
+	if limit < 0 {
+		// Unlimited.
+		return convAttrs(attrs), 0
+	}
+
+	limit = min(len(attrs), limit)
+	return convAttrs(attrs[:limit]), uint32(len(attrs) - limit)
+}
+
 func convAttrs(attrs []attribute.KeyValue) []telemetry.Attr {
+	if len(attrs) == 0 {
+		// Avoid allocations if not necessary.
+		return nil
+	}
+
 	out := make([]telemetry.Attr, 0, len(attrs))
 	for _, attr := range attrs {
 		key := string(attr.Key)
@@ -273,9 +193,17 @@ func convAttrValue(value attribute.Value) telemetry.Value {
 }
 
 func (s *span) End(opts ...trace.SpanEndOption) {
-	if s == nil || !s.sampled {
+	if s == nil || !s.sampled.Swap(false) {
 		return
 	}
+
+	// s.end exists so the lock (s.mu) is not held while s.ended is called.
+	s.ended(s.end(opts))
+}
+
+func (s *span) end(opts []trace.SpanEndOption) []byte {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	cfg := trace.NewSpanEndConfig(opts...)
 	if t := cfg.Timestamp(); !t.IsZero() {
@@ -285,10 +213,7 @@ func (s *span) End(opts ...trace.SpanEndOption) {
 	}
 
 	b, _ := json.Marshal(s.traces) // TODO: do not ignore this error.
-
-	s.sampled = false
-
-	s.ended(b)
+	return b
 }
 
 // Expected to be implemented in eBPF.
@@ -300,7 +225,7 @@ func (*span) ended(buf []byte) { ended(buf) }
 var ended = func([]byte) {}
 
 func (s *span) RecordError(err error, opts ...trace.EventOption) {
-	if s == nil || err == nil || !s.sampled {
+	if s == nil || err == nil || !s.sampled.Load() {
 		return
 	}
 
@@ -317,6 +242,9 @@ func (s *span) RecordError(err error, opts ...trace.EventOption) {
 		attrs = append(attrs, semconv.ExceptionStacktrace(string(buf[0:n])))
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	s.addEvent(semconv.ExceptionEventName, cfg.Timestamp(), attrs)
 }
 
@@ -330,30 +258,62 @@ func typeStr(i any) string {
 }
 
 func (s *span) AddEvent(name string, opts ...trace.EventOption) {
-	if s == nil || !s.sampled {
+	if s == nil || !s.sampled.Load() {
 		return
 	}
 
 	cfg := trace.NewEventConfig(opts...)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	s.addEvent(name, cfg.Timestamp(), cfg.Attributes())
 }
 
+// addEvent adds an event with name and attrs at tStamp to the span. The span
+// lock (s.mu) needs to be held by the caller.
 func (s *span) addEvent(name string, tStamp time.Time, attrs []attribute.KeyValue) {
-	// TODO: handle event limits.
+	limit := maxSpan.Events
 
-	s.span.Events = append(s.span.Events, &telemetry.SpanEvent{
-		Time:  tStamp,
-		Name:  name,
-		Attrs: convAttrs(attrs),
-	})
-}
-
-func (s *span) AddLink(link trace.Link) {
-	if s == nil || !s.sampled {
+	if limit == 0 {
+		s.span.DroppedEvents++
 		return
 	}
 
-	// TODO: handle link limits.
+	if limit > 0 && len(s.span.Events) == limit {
+		// Drop head while avoiding allocation of more capacity.
+		copy(s.span.Events[:limit-1], s.span.Events[1:])
+		s.span.Events = s.span.Events[:limit-1]
+		s.span.DroppedEvents++
+	}
+
+	e := &telemetry.SpanEvent{Time: tStamp, Name: name}
+	e.Attrs, e.DroppedAttrs = convCappedAttrs(maxSpan.EventAttrs, attrs)
+
+	s.span.Events = append(s.span.Events, e)
+}
+
+func (s *span) AddLink(link trace.Link) {
+	if s == nil || !s.sampled.Load() {
+		return
+	}
+
+	l := maxSpan.Links
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if l == 0 {
+		s.span.DroppedLinks++
+		return
+	}
+
+	if l > 0 && len(s.span.Links) == l {
+		// Drop head while avoiding allocation of more capacity.
+		copy(s.span.Links[:l-1], s.span.Links[1:])
+		s.span.Links = s.span.Links[:l-1]
+		s.span.DroppedLinks++
+	}
 
 	s.span.Links = append(s.span.Links, convLink(link))
 }
@@ -367,19 +327,25 @@ func convLinks(links []trace.Link) []*telemetry.SpanLink {
 }
 
 func convLink(link trace.Link) *telemetry.SpanLink {
-	return &telemetry.SpanLink{
+	l := &telemetry.SpanLink{
 		TraceID:    telemetry.TraceID(link.SpanContext.TraceID()),
 		SpanID:     telemetry.SpanID(link.SpanContext.SpanID()),
 		TraceState: link.SpanContext.TraceState().String(),
-		Attrs:      convAttrs(link.Attributes),
 		Flags:      uint32(link.SpanContext.TraceFlags()),
 	}
+	l.Attrs, l.DroppedAttrs = convCappedAttrs(maxSpan.LinkAttrs, link.Attributes)
+
+	return l
 }
 
 func (s *span) SetName(name string) {
-	if s == nil || !s.sampled {
+	if s == nil || !s.sampled.Load() {
 		return
 	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	s.span.Name = name
 }
 

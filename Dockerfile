@@ -1,4 +1,4 @@
-FROM  --platform=$BUILDPLATFORM golang:1.23.2-bookworm AS base
+FROM  --platform=$BUILDPLATFORM golang:1.23.4-bookworm@sha256:97d0f37d858c35aa65369f72962dc2b6901c1a2d36f31e73db384eb7c204369b AS base
 
 RUN apt-get update && apt-get install -y curl clang gcc llvm make libbpf-dev
 
@@ -18,6 +18,6 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg \
     GOARCH=$TARGETARCH make build
 
-FROM gcr.io/distroless/base-debian12@sha256:8fe31fb9d159141d9c3ff99f1fd287239d89d97ea95fea1f08f82ea5f2b544da
+FROM gcr.io/distroless/base-debian12@sha256:e9d0321de8927f69ce20e39bfc061343cce395996dfc1f0db6540e5145bc63a5
 COPY --from=builder /app/otel-go-instrumentation /
 CMD ["/otel-go-instrumentation"]

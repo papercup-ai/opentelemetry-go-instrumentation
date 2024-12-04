@@ -7,7 +7,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"math"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -144,7 +145,7 @@ func TestSpanCreation(t *testing.T) {
 			Eval: func(t *testing.T, _ context.Context, s *span) {
 				assertTracer(s.traces)
 
-				assert.True(t, s.sampled, "not sampled by default.")
+				assert.True(t, s.sampled.Load(), "not sampled by default.")
 			},
 		},
 		{
@@ -195,7 +196,7 @@ func TestSpanCreation(t *testing.T) {
 				}
 			},
 			Eval: func(t *testing.T, _ context.Context, s *span) {
-				assert.False(t, s.sampled, "sampled")
+				assert.False(t, s.sampled.Load(), "sampled")
 			},
 		},
 		{
@@ -265,24 +266,6 @@ func TestSpanCreation(t *testing.T) {
 	}
 }
 
-func TestSpanKindTransform(t *testing.T) {
-	tests := map[trace.SpanKind]telemetry.SpanKind{
-		trace.SpanKind(-1):          telemetry.SpanKind(0),
-		trace.SpanKindUnspecified:   telemetry.SpanKind(0),
-		trace.SpanKind(math.MaxInt): telemetry.SpanKind(0),
-
-		trace.SpanKindInternal: telemetry.SpanKindInternal,
-		trace.SpanKindServer:   telemetry.SpanKindServer,
-		trace.SpanKindClient:   telemetry.SpanKindClient,
-		trace.SpanKindProducer: telemetry.SpanKindProducer,
-		trace.SpanKindConsumer: telemetry.SpanKindConsumer,
-	}
-
-	for in, want := range tests {
-		assert.Equal(t, want, spanKind(in), in.String())
-	}
-}
-
 func TestSpanEnd(t *testing.T) {
 	orig := ended
 	t.Cleanup(func() { ended = orig })
@@ -319,7 +302,7 @@ func TestSpanEnd(t *testing.T) {
 			s := spanBuilder{}.Build()
 			s.End(test.Options...)
 
-			assert.False(t, s.sampled, "ended span should not be sampled")
+			assert.False(t, s.sampled.Load(), "ended span should not be sampled")
 			require.NotNil(t, buf, "no span data emitted")
 
 			var traces telemetry.Traces
@@ -371,6 +354,81 @@ func TestSpanAddLink(t *testing.T) {
 	assert.Equal(t, want, s.span.Links)
 }
 
+func TestSpanAddLinkLimit(t *testing.T) {
+	tests := []struct {
+		limit   int
+		want    []*telemetry.SpanLink
+		dropped uint32
+	}{
+		{0, nil, 2},
+		{1, []*telemetry.SpanLink{tLink1}, 1},
+		{2, []*telemetry.SpanLink{tLink0, tLink1}, 0},
+		{-1, []*telemetry.SpanLink{tLink0, tLink1}, 0},
+	}
+
+	for _, test := range tests {
+		t.Run("Limit/"+strconv.Itoa(test.limit), func(t *testing.T) {
+			orig := maxSpan.Links
+			maxSpan.Links = test.limit
+			t.Cleanup(func() { maxSpan.Links = orig })
+
+			builder := spanBuilder{}
+			s := builder.Build()
+			s.AddLink(link0)
+			s.AddLink(link1)
+			assert.Equal(t, test.want, s.span.Links, "AddLink")
+			assert.Equal(t, test.dropped, s.span.DroppedLinks, "AddLink DroppedLinks")
+
+			builder.Options = []trace.SpanStartOption{
+				trace.WithLinks(link0, link1),
+			}
+			s = builder.Build()
+			assert.Equal(t, test.want, s.span.Links, "NewSpan")
+			assert.Equal(t, test.dropped, s.span.DroppedLinks, "NewSpan DroppedLinks")
+		})
+	}
+}
+
+func TestSpanLinkAttrLimit(t *testing.T) {
+	tests := []struct {
+		limit   int
+		want    []telemetry.Attr
+		dropped uint32
+	}{
+		{0, nil, uint32(len(tAttrs))},
+		{2, tAttrs[:2], uint32(len(tAttrs) - 2)},
+		{len(tAttrs), tAttrs, 0},
+		{-1, tAttrs, 0},
+	}
+
+	link := trace.Link{Attributes: attrs}
+	for _, test := range tests {
+		t.Run("Limit/"+strconv.Itoa(test.limit), func(t *testing.T) {
+			orig := maxSpan.LinkAttrs
+			maxSpan.LinkAttrs = test.limit
+			t.Cleanup(func() { maxSpan.LinkAttrs = orig })
+
+			builder := spanBuilder{}
+
+			s := builder.Build()
+			s.AddLink(link)
+
+			require.Len(t, s.span.Links, 1)
+			got := s.span.Links[0]
+			assert.Equal(t, test.want, got.Attrs, "AddLink attrs")
+			assert.Equal(t, test.dropped, got.DroppedAttrs, "dropped AddLink attrs")
+
+			builder.Options = []trace.SpanStartOption{trace.WithLinks(link)}
+			s = builder.Build()
+
+			require.Len(t, s.span.Links, 1)
+			got = s.span.Links[0]
+			assert.Equal(t, test.want, got.Attrs, "NewSpan link attrs")
+			assert.Equal(t, test.dropped, got.DroppedAttrs, "dropped NewSpan link attrs")
+		})
+	}
+}
+
 func TestSpanIsRecording(t *testing.T) {
 	builder := spanBuilder{}
 	s := builder.Build()
@@ -417,6 +475,77 @@ func TestSpanRecordError(t *testing.T) {
 		}
 	}
 	assert.True(t, hasST, "missing stacktrace attribute")
+}
+
+func TestAddEventLimit(t *testing.T) {
+	const a, b, c = "a", "b", "c"
+
+	ts := time.Now()
+
+	evtA := &telemetry.SpanEvent{Name: "a", Time: ts}
+	evtB := &telemetry.SpanEvent{Name: "b", Time: ts}
+	evtC := &telemetry.SpanEvent{Name: "c", Time: ts}
+
+	tests := []struct {
+		limit   int
+		want    []*telemetry.SpanEvent
+		dropped uint32
+	}{
+		{0, nil, 3},
+		{1, []*telemetry.SpanEvent{evtC}, 2},
+		{2, []*telemetry.SpanEvent{evtB, evtC}, 1},
+		{3, []*telemetry.SpanEvent{evtA, evtB, evtC}, 0},
+		{-1, []*telemetry.SpanEvent{evtA, evtB, evtC}, 0},
+	}
+
+	for _, test := range tests {
+		t.Run("Limit/"+strconv.Itoa(test.limit), func(t *testing.T) {
+			orig := maxSpan.Events
+			maxSpan.Events = test.limit
+			t.Cleanup(func() { maxSpan.Events = orig })
+
+			builder := spanBuilder{}
+
+			s := builder.Build()
+			s.addEvent(a, ts, nil)
+			s.addEvent(b, ts, nil)
+			s.addEvent(c, ts, nil)
+
+			assert.Equal(t, test.want, s.span.Events, "add event")
+			assert.Equal(t, test.dropped, s.span.DroppedEvents, "dropped events")
+		})
+	}
+}
+
+func TestAddEventAttrLimit(t *testing.T) {
+	tests := []struct {
+		limit   int
+		want    []telemetry.Attr
+		dropped uint32
+	}{
+		{0, nil, uint32(len(tAttrs))},
+		{2, tAttrs[:2], uint32(len(tAttrs) - 2)},
+		{len(tAttrs), tAttrs, 0},
+		{-1, tAttrs, 0},
+	}
+
+	for _, test := range tests {
+		t.Run("Limit/"+strconv.Itoa(test.limit), func(t *testing.T) {
+			orig := maxSpan.EventAttrs
+			maxSpan.EventAttrs = test.limit
+			t.Cleanup(func() { maxSpan.EventAttrs = orig })
+
+			builder := spanBuilder{}
+
+			s := builder.Build()
+			s.addEvent("name", time.Now(), attrs)
+
+			require.Len(t, s.span.Events, 1)
+			got := s.span.Events[0]
+			assert.Equal(t, test.want, got.Attrs, "event attrs")
+			assert.Equal(t, test.dropped, got.DroppedAttrs, "dropped event attrs")
+		})
+	}
 }
 
 func TestSpanSpanContext(t *testing.T) {
@@ -473,11 +602,49 @@ func TestSpanSetAttributes(t *testing.T) {
 	assert.Equal(t, tAttrs, s.span.Attrs, "SpanAttributes did not override")
 }
 
+func TestSpanAttributeLimits(t *testing.T) {
+	tests := []struct {
+		limit   int
+		want    []telemetry.Attr
+		dropped uint32
+	}{
+		{0, nil, uint32(len(tAttrs))},
+		{2, tAttrs[:2], uint32(len(tAttrs) - 2)},
+		{len(tAttrs), tAttrs, 0},
+		{-1, tAttrs, 0},
+	}
+
+	for _, test := range tests {
+		t.Run("Limit/"+strconv.Itoa(test.limit), func(t *testing.T) {
+			orig := maxSpan.Attrs
+			maxSpan.Attrs = test.limit
+			t.Cleanup(func() { maxSpan.Attrs = orig })
+
+			builder := spanBuilder{}
+
+			s := builder.Build()
+			s.SetAttributes(attrs...)
+			assert.Equal(t, test.want, s.span.Attrs, "set span attributes")
+			assert.Equal(t, test.dropped, s.span.DroppedAttrs, "dropped attrs")
+
+			s.SetAttributes(attrs...)
+			assert.Equal(t, test.want, s.span.Attrs, "set span attributes twice")
+			assert.Equal(t, 2*test.dropped, s.span.DroppedAttrs, "2x dropped attrs")
+
+			builder.Options = []trace.SpanStartOption{trace.WithAttributes(attrs...)}
+
+			s = builder.Build()
+			assert.Equal(t, test.want, s.span.Attrs, "new span attributes")
+			assert.Equal(t, test.dropped, s.span.DroppedAttrs, "dropped attrs")
+		})
+	}
+}
+
 func TestSpanTracerProvider(t *testing.T) {
 	var s span
 
 	got := s.TracerProvider()
-	assert.IsType(t, tracerProvider{}, got)
+	assert.IsType(t, &tracerProvider{}, got)
 }
 
 type spanBuilder struct {
@@ -489,9 +656,9 @@ type spanBuilder struct {
 
 func (b spanBuilder) Build() *span {
 	tracer := new(tracer)
-	s := &span{sampled: !b.NotSampled, spanContext: b.SpanContext}
+	s := &span{spanContext: b.SpanContext}
+	s.sampled.Store(!b.NotSampled)
 	s.traces, s.span = tracer.traces(
-		context.Background(),
 		b.Name,
 		trace.NewSpanStartConfig(b.Options...),
 		s.spanContext,
@@ -499,4 +666,93 @@ func (b spanBuilder) Build() *span {
 	)
 
 	return s
+}
+
+func TestSpanConcurrentSafe(t *testing.T) {
+	t.Parallel()
+
+	const (
+		nTracers   = 2
+		nSpans     = 2
+		nGoroutine = 10
+	)
+
+	runSpan := func(s trace.Span) <-chan struct{} {
+		done := make(chan struct{})
+		go func(span trace.Span) {
+			defer close(done)
+
+			var wg sync.WaitGroup
+			for i := 0; i < nGoroutine; i++ {
+				wg.Add(1)
+				go func(n int) {
+					defer wg.Done()
+
+					_ = s.IsRecording()
+					_ = s.SpanContext()
+					_ = s.TracerProvider()
+
+					s.AddEvent("event")
+					s.AddLink(trace.Link{})
+					s.RecordError(errors.New("err"))
+					s.SetStatus(codes.Error, "error")
+					s.SetName("span" + strconv.Itoa(n))
+					s.SetAttributes(attribute.Bool("key", true))
+
+					s.End()
+				}(i)
+			}
+
+			wg.Wait()
+		}(s)
+		return done
+	}
+
+	runTracer := func(tr trace.Tracer) <-chan struct{} {
+		done := make(chan struct{})
+		go func(tracer trace.Tracer) {
+			defer close(done)
+
+			ctx := context.Background()
+
+			var wg sync.WaitGroup
+			for i := 0; i < nSpans; i++ {
+				wg.Add(1)
+				go func(n int) {
+					defer wg.Done()
+					_, s := tracer.Start(ctx, "span"+strconv.Itoa(n))
+					<-runSpan(s)
+				}(i)
+			}
+
+			wg.Wait()
+		}(tr)
+		return done
+	}
+
+	run := func(tp trace.TracerProvider) <-chan struct{} {
+		done := make(chan struct{})
+		go func(provider trace.TracerProvider) {
+			defer close(done)
+
+			var wg sync.WaitGroup
+			for i := 0; i < nTracers; i++ {
+				wg.Add(1)
+				go func(n int) {
+					defer wg.Done()
+					<-runTracer(provider.Tracer("tracer" + strconv.Itoa(n)))
+				}(i)
+			}
+
+			wg.Wait()
+		}(tp)
+		return done
+	}
+
+	assert.NotPanics(t, func() {
+		done0, done1 := run(TracerProvider()), run(TracerProvider())
+
+		<-done0
+		<-done1
+	})
 }
