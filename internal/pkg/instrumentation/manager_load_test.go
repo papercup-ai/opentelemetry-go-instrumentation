@@ -1,7 +1,7 @@
 // Copyright The OpenTelemetry Authors
 // SPDX-License-Identifier: Apache-2.0
 
-//go:build multi_kernel_test
+//go:build ebpf_test
 
 package instrumentation
 
@@ -35,7 +35,7 @@ func TestLoadProbes(t *testing.T) {
 				offsets[f.ModPath] = ver
 			}
 		}
-		t.Run(p.Manifest().Id.String(), func(t *testing.T) {
+		t.Run(p.Manifest().ID.String(), func(t *testing.T) {
 			testProbe, ok := p.(testutils.TestProbe)
 			assert.True(t, ok)
 			testutils.ProbesLoad(t, testProbe, offsets)

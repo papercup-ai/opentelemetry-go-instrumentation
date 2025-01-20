@@ -42,22 +42,22 @@ func New(logger *slog.Logger, version string) probe.Probe {
 				probe.AllocationConst{},
 				probe.StructFieldConst{
 					Key: "writer_topic_pos",
-					Val: structfield.NewID("github.com/segmentio/kafka-go", "github.com/segmentio/kafka-go", "Writer", "Topic"),
+					ID:  structfield.NewID("github.com/segmentio/kafka-go", "github.com/segmentio/kafka-go", "Writer", "Topic"),
 				},
 				probe.StructFieldConst{
 					Key: "message_headers_pos",
-					Val: structfield.NewID("github.com/segmentio/kafka-go", "github.com/segmentio/kafka-go", "Message", "Headers"),
+					ID:  structfield.NewID("github.com/segmentio/kafka-go", "github.com/segmentio/kafka-go", "Message", "Headers"),
 				},
 				probe.StructFieldConst{
 					Key: "message_key_pos",
-					Val: structfield.NewID("github.com/segmentio/kafka-go", "github.com/segmentio/kafka-go", "Message", "Key"),
+					ID:  structfield.NewID("github.com/segmentio/kafka-go", "github.com/segmentio/kafka-go", "Message", "Key"),
 				},
 				probe.StructFieldConst{
 					Key: "message_time_pos",
-					Val: structfield.NewID("github.com/segmentio/kafka-go", "github.com/segmentio/kafka-go", "Message", "Time"),
+					ID:  structfield.NewID("github.com/segmentio/kafka-go", "github.com/segmentio/kafka-go", "Message", "Time"),
 				},
 			},
-			Uprobes: []probe.Uprobe{
+			Uprobes: []*probe.Uprobe{
 				{
 					Sym:         "github.com/segmentio/kafka-go.(*Writer).WriteMessages",
 					EntryProbe:  "uprobe_WriteMessages",

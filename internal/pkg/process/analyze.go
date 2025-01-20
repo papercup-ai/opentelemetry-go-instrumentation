@@ -21,7 +21,7 @@ type TargetDetails struct {
 	PID               int
 	Functions         []*binary.Func
 	GoVersion         *version.Version
-	Libraries         map[string]*version.Version
+	Modules           map[string]*version.Version
 	AllocationDetails *AllocationDetails
 }
 
@@ -54,18 +54,22 @@ func (t *TargetDetails) GetFunctionReturns(name string) ([]uint64, error) {
 	return nil, fmt.Errorf("could not find returns for function %s", name)
 }
 
+// OpenExe opens the executable of the target process for reading.
+func (t *TargetDetails) OpenExe() (*os.File, error) {
+	path := fmt.Sprintf("/proc/%d/exe", t.PID)
+	return os.Open(path)
+}
+
 // Analyze returns the target details for an actively running process.
 func (a *Analyzer) Analyze(pid int, relevantFuncs map[string]interface{}) (*TargetDetails, error) {
-	result := &TargetDetails{
-		PID: pid,
-	}
+	result := &TargetDetails{PID: pid}
 
-	f, err := os.Open(fmt.Sprintf("/proc/%d/exe", pid))
+	f, err := result.OpenExe()
 	if err != nil {
 		return nil, err
 	}
-
 	defer f.Close()
+
 	elfF, err := elf.NewFile(f)
 	if err != nil {
 		return nil, err
@@ -76,16 +80,16 @@ func (a *Analyzer) Analyze(pid int, relevantFuncs map[string]interface{}) (*Targ
 		return nil, err
 	}
 	result.GoVersion = goVersion
-	result.Libraries = make(map[string]*version.Version, len(a.BuildInfo.Deps)+1)
+	result.Modules = make(map[string]*version.Version, len(a.BuildInfo.Deps)+1)
 	for _, dep := range a.BuildInfo.Deps {
 		depVersion, err := version.NewVersion(dep.Version)
 		if err != nil {
 			a.logger.Error("parsing dependency version", "error", err, "dependency", dep)
 			continue
 		}
-		result.Libraries[dep.Path] = depVersion
+		result.Modules[dep.Path] = depVersion
 	}
-	result.Libraries["std"] = goVersion
+	result.Modules["std"] = goVersion
 
 	funcs, err := a.findFunctions(elfF, relevantFuncs)
 	if err != nil {

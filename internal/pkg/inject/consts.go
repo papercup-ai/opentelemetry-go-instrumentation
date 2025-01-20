@@ -4,6 +4,7 @@
 package inject
 
 import (
+	"debug/elf"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -51,10 +52,29 @@ func Constants(spec *ebpf.CollectionSpec, opts ...Option) error {
 	if err != nil {
 		return err
 	}
-	if len(consts) == 0 {
-		return nil
+
+	var missing []string
+	for name, val := range consts {
+		v, ok := spec.Variables[name]
+		if !ok {
+			missing = append(missing, name)
+			continue
+		}
+
+		if !v.Constant() {
+			return fmt.Errorf("variable %s is not a constant", name)
+		}
+
+		if err := v.Set(val); err != nil {
+			return fmt.Errorf("rewriting constant %s: %w", name, err)
+		}
 	}
-	return spec.RewriteConstants(consts)
+
+	if len(missing) != 0 {
+		return fmt.Errorf("rewrite constants: constants are missing from .rodata: %v", missing)
+	}
+
+	return nil
 }
 
 func newConsts(opts []Option) (map[string]interface{}, error) {
@@ -138,6 +158,34 @@ func WithOffset(key string, id structfield.ID, ver *version.Version) Option {
 		}
 	}
 	return WithKeyValue(key, off.Offset)
+}
+
+func FindOffset(id structfield.ID, td *process.TargetDetails) (structfield.OffsetKey, error) {
+	fd, err := td.OpenExe()
+	if err != nil {
+		return structfield.OffsetKey{}, err
+	}
+	defer fd.Close()
+
+	elfF, err := elf.NewFile(fd)
+	if err != nil {
+		return structfield.OffsetKey{}, err
+	}
+
+	data, err := elfF.DWARF()
+	if err != nil {
+		return structfield.OffsetKey{}, err
+	}
+
+	v, err := process.DWARF{Reader: data.Reader()}.GoStructField(id)
+	if err != nil {
+		return structfield.OffsetKey{}, err
+	}
+	return structfield.OffsetKey{Offset: uint64(v), Valid: true}, err
+}
+
+func GetOffset(id structfield.ID, ver *version.Version) (structfield.OffsetKey, bool) {
+	return offsets.GetOffset(id, ver)
 }
 
 func GetLatestOffset(id structfield.ID) (structfield.OffsetKey, *version.Version) {
